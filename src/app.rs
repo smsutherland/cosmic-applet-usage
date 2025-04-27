@@ -5,12 +5,10 @@ use std::{sync::LazyLock, time::Duration};
 use crate::{config::Config, fl};
 use cosmic::{
     cosmic_config::{self, CosmicConfigEntry},
-    iced::{
-        alignment::{Horizontal, Vertical},
-        stream, Subscription,
-    },
+    iced::{alignment::Vertical, stream, Subscription},
+    iced_widget::row,
     prelude::*,
-    widget::{self, autosize, Id},
+    widget::{autosize, Id},
 };
 use futures_util::SinkExt;
 use tokio::time::interval;
@@ -31,7 +29,11 @@ pub struct UsageApp {
 #[derive(Debug, Clone)]
 pub enum Message {
     UpdateConfig(Config),
-    Cpu(f32),
+    UsageUpdate {
+        cpu: Option<f32>,
+        mem: Option<f32>,
+        swap: Option<f32>,
+    },
 }
 
 /// Create a COSMIC application from the app model
@@ -77,7 +79,7 @@ impl cosmic::Application for UsageApp {
                     }
                 })
                 .unwrap_or_default(),
-            usage_info: UsageInfo { cpu_usage: 0. },
+            usage_info: UsageInfo::default(),
         };
 
         (app, Task::none())
@@ -88,13 +90,23 @@ impl cosmic::Application for UsageApp {
     /// Application events will be processed through the view. Any messages emitted by
     /// events received by widgets will be passed to the update method.
     fn view(&self) -> Element<Self::Message> {
+        let cpu = self
+            .core
+            .applet
+            .text(fl!("cpu", cpu = ((self.usage_info.cpu) as u8)));
+
+        let memory = self
+            .core
+            .applet
+            .text(fl!("memory", mem = ((self.usage_info.memory * 100.) as u8)));
+
+        let swap = self
+            .core
+            .applet
+            .text(fl!("swap", swap = ((self.usage_info.swap * 100.) as u8)));
+
         autosize::autosize(
-            self.core
-                .applet
-                .text(fl!("cpu", cpu = ((self.usage_info.cpu_usage) as u8)))
-                .apply(widget::container)
-                .align_x(Horizontal::Center)
-                .align_y(Vertical::Center),
+            row![cpu, memory, swap].spacing(5).align_y(Vertical::Center),
             AUTOSIZE_MAIN_ID.clone(),
         )
         .into()
@@ -113,11 +125,24 @@ impl cosmic::Application for UsageApp {
                 let mut interval = interval(Duration::from_secs(1));
                 loop {
                     interval.tick().await;
+
                     sys.refresh_cpu_usage();
                     let cpus = sys.cpus();
-                    let usage =
+                    let cpu_usage =
                         cpus.iter().map(|cpu| cpu.cpu_usage()).sum::<f32>() / cpus.len() as f32;
-                    output.send(Message::Cpu(usage)).await.unwrap();
+
+                    sys.refresh_memory();
+                    let memory_usage =
+                        1. - sys.available_memory() as f32 / sys.total_memory() as f32;
+                    let swap_usage = 1. - sys.free_swap() as f32 / sys.total_swap() as f32;
+
+                    let message = Message::UsageUpdate {
+                        cpu: Some(cpu_usage),
+                        mem: Some(memory_usage),
+                        swap: Some(swap_usage),
+                    };
+
+                    output.send(message).await.unwrap();
                 }
             }),
         );
@@ -146,8 +171,16 @@ impl cosmic::Application for UsageApp {
             Message::UpdateConfig(config) => {
                 self.config = config;
             }
-            Message::Cpu(usage) => {
-                self.usage_info.cpu_usage = usage;
+            Message::UsageUpdate { cpu, mem, swap } => {
+                if let Some(cpu) = cpu {
+                    self.usage_info.cpu = cpu;
+                }
+                if let Some(mem) = mem {
+                    self.usage_info.memory = mem;
+                }
+                if let Some(swap) = swap {
+                    self.usage_info.swap = swap;
+                }
             }
         }
         Task::none()
@@ -158,6 +191,9 @@ impl cosmic::Application for UsageApp {
     }
 }
 
+#[derive(Debug, Default)]
 struct UsageInfo {
-    cpu_usage: f32,
+    cpu: f32,
+    memory: f32,
+    swap: f32,
 }
