@@ -1,11 +1,12 @@
 [Desktop Entry]
 Name=Cosmic Applet Usage
-Comment=Show CPU and memory usage on your COSMIC panel
 Type=Application
 Icon=com.github.smsutherland.cosmic-applet-usage
 Exec=cosmic-applet-usage %F
 Terminal=false
 StartupNotify=true
+NoDisplay=true
 Categories=COSMIC
-Keywords=COSMIC
-MimeType=
+Keywords=COSMIC;iced
+X-CosmicApplet=true
+X-CosmicHoverPopup=Auto
