@@ -1,16 +1,21 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use crate::config::Config;
-use crate::fl;
+use std::{sync::LazyLock, time::Duration};
+
+use crate::{config::Config, fl};
 use cosmic::{
     cosmic_config::{self, CosmicConfigEntry},
     iced::{
         alignment::{Horizontal, Vertical},
-        Length, Subscription,
+        stream, Subscription,
     },
     prelude::*,
-    widget,
+    widget::{self, autosize, Id},
 };
+use futures_util::SinkExt;
+use tokio::time::interval;
+
+static AUTOSIZE_MAIN_ID: LazyLock<Id> = LazyLock::new(|| Id::new("autosize-main"));
 
 /// The application model stores app-specific state used to describe its interface and
 /// drive its logic.
@@ -19,12 +24,14 @@ pub struct UsageApp {
     core: cosmic::Core,
     // Configuration data that persists between application runs.
     config: Config,
+    usage_info: UsageInfo,
 }
 
 /// Messages emitted by the application and its widgets.
 #[derive(Debug, Clone)]
 pub enum Message {
     UpdateConfig(Config),
+    Cpu(f32),
 }
 
 /// Create a COSMIC application from the app model
@@ -70,6 +77,7 @@ impl cosmic::Application for UsageApp {
                     }
                 })
                 .unwrap_or_default(),
+            usage_info: UsageInfo { cpu_usage: 0. },
         };
 
         (app, Task::none())
@@ -80,15 +88,16 @@ impl cosmic::Application for UsageApp {
     /// Application events will be processed through the view. Any messages emitted by
     /// events received by widgets will be passed to the update method.
     fn view(&self) -> Element<Self::Message> {
-        self.core
-            .applet
-            .text(fl!("welcome"))
-            .apply(widget::container)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(Horizontal::Center)
-            .align_y(Vertical::Center)
-            .into()
+        autosize::autosize(
+            self.core
+                .applet
+                .text(fl!("cpu", cpu = ((self.usage_info.cpu_usage) as u8)))
+                .apply(widget::container)
+                .align_x(Horizontal::Center)
+                .align_y(Vertical::Center),
+            AUTOSIZE_MAIN_ID.clone(),
+        )
+        .into()
     }
 
     /// Register subscriptions for this application.
@@ -97,7 +106,24 @@ impl cosmic::Application for UsageApp {
     /// emit messages to the application through a channel. They are started at the
     /// beginning of the application, and persist through its lifetime.
     fn subscription(&self) -> Subscription<Self::Message> {
+        let sysinfo = Subscription::run_with_id(
+            "sysinfo-sub",
+            stream::channel(1, async move |mut output| {
+                let mut sys = sysinfo::System::new_all();
+                let mut interval = interval(Duration::from_secs(1));
+                loop {
+                    interval.tick().await;
+                    sys.refresh_cpu_usage();
+                    let cpus = sys.cpus();
+                    let usage =
+                        cpus.iter().map(|cpu| cpu.cpu_usage()).sum::<f32>() / cpus.len() as f32;
+                    output.send(Message::Cpu(usage)).await.unwrap();
+                }
+            }),
+        );
+
         Subscription::batch(vec![
+            sysinfo,
             // Watch for application configuration changes.
             self.core()
                 .watch_config::<Config>(Self::APP_ID)
@@ -120,6 +146,9 @@ impl cosmic::Application for UsageApp {
             Message::UpdateConfig(config) => {
                 self.config = config;
             }
+            Message::Cpu(usage) => {
+                self.usage_info.cpu_usage = usage;
+            }
         }
         Task::none()
     }
@@ -127,4 +156,8 @@ impl cosmic::Application for UsageApp {
     fn style(&self) -> Option<cosmic::iced_runtime::Appearance> {
         Some(cosmic::applet::style())
     }
+}
+
+struct UsageInfo {
+    cpu_usage: f32,
 }
