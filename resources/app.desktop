@@ -1,5 +1,5 @@
 [Desktop Entry]
-Name=Cosmic Applet Usage
+Name=Usage
 Type=Application
 Icon=com.github.smsutherland.cosmic-applet-usage
 Exec=cosmic-applet-usage %F
