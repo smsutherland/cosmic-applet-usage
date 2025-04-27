@@ -12,13 +12,12 @@ use cosmic::{
     widget::{autosize, button, checkbox, container, Id, Row},
 };
 use futures_util::SinkExt;
-use tokio::time::interval;
+use tokio::{select, sync::broadcast, time::interval};
 
 static AUTOSIZE_MAIN_ID: LazyLock<Id> = LazyLock::new(|| Id::new("autosize-main"));
 
 /// The application model stores app-specific state used to describe its interface and
 /// drive its logic.
-#[derive(Default)]
 pub struct UsageApp {
     /// Application state which is managed by the COSMIC runtime.
     core: cosmic::Core,
@@ -26,6 +25,7 @@ pub struct UsageApp {
     config: Config,
     usage_info: UsageInfo,
     popup: Option<window::Id>,
+    update_stats_tx: broadcast::Sender<(UsageElement, bool)>,
 }
 
 /// Messages emitted by the application and its widgets.
@@ -68,6 +68,8 @@ impl cosmic::Application for UsageApp {
         core: cosmic::Core,
         _flags: Self::Flags,
     ) -> (Self, Task<cosmic::Action<Self::Message>>) {
+        let (update_stats_to_watch_tx, _) = broadcast::channel(16);
+
         // Construct the app model with the runtime's core.
         let app = UsageApp {
             core,
@@ -78,7 +80,9 @@ impl cosmic::Application for UsageApp {
                     Err((_errors, config)) => config,
                 })
                 .unwrap_or_default(),
-            ..Default::default()
+            usage_info: Default::default(),
+            popup: None,
+            update_stats_tx: update_stats_to_watch_tx,
         };
 
         (app, Task::none())
@@ -89,29 +93,26 @@ impl cosmic::Application for UsageApp {
     /// Application events will be processed through the view. Any messages emitted by
     /// events received by widgets will be passed to the update method.
     fn view(&self) -> Element<Self::Message> {
-        let cpu = self
-            .core
-            .applet
-            .text(fl!("cpu", cpu = ((self.usage_info.cpu) as u8)));
-
-        let memory = self
-            .core
-            .applet
-            .text(fl!("memory", mem = ((self.usage_info.memory * 100.) as u8)));
-
-        let swap = self
-            .core
-            .applet
-            .text(fl!("swap", swap = ((self.usage_info.swap * 100.) as u8)));
-
         let mut row = Row::new().spacing(5);
         if self.config.cpu_enabled {
+            let cpu = self
+                .core
+                .applet
+                .text(fl!("cpu", cpu = ((self.usage_info.cpu) as u8)));
             row = row.push(cpu);
         }
         if self.config.memory_enabled {
+            let memory = self
+                .core
+                .applet
+                .text(fl!("memory", mem = ((self.usage_info.memory * 100.) as u8)));
             row = row.push(memory);
         }
         if self.config.swap_enabled {
+            let swap = self
+                .core
+                .applet
+                .text(fl!("swap", swap = ((self.usage_info.swap * 100.) as u8)));
             row = row.push(swap);
         };
 
@@ -141,31 +142,52 @@ impl cosmic::Application for UsageApp {
     /// emit messages to the application through a channel. They are started at the
     /// beginning of the application, and persist through its lifetime.
     fn subscription(&self) -> Subscription<Self::Message> {
+        let mut update_stats_rx = self.update_stats_tx.subscribe();
+        let mut config = self.config.clone();
+
         let sysinfo = Subscription::run_with_id(
             "sysinfo-sub",
             stream::channel(1, async move |mut output| {
-                let mut sys = sysinfo::System::new_all();
+                let mut sys = sysinfo::System::new();
                 let mut interval = interval(Duration::from_secs(1));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 loop {
-                    interval.tick().await;
+                    select! {
+                        _ = interval.tick() => {
+                            let cpu = config.cpu_enabled.then(|| {
+                                sys.refresh_cpu_usage();
+                                let cpus = sys.cpus();
+                                cpus.iter().map(|cpu| cpu.cpu_usage()).sum::<f32>() / cpus.len() as f32
+                            });
 
-                    sys.refresh_cpu_usage();
-                    let cpus = sys.cpus();
-                    let cpu_usage =
-                        cpus.iter().map(|cpu| cpu.cpu_usage()).sum::<f32>() / cpus.len() as f32;
+                            if config.memory_enabled || config.swap_enabled {
+                                sys.refresh_memory();
+                            }
 
-                    sys.refresh_memory();
-                    let memory_usage =
-                        1. - sys.available_memory() as f32 / sys.total_memory() as f32;
-                    let swap_usage = 1. - sys.free_swap() as f32 / sys.total_swap() as f32;
+                            let mem = config.memory_enabled.then(||{
+                                1. - sys.available_memory() as f32 / sys.total_memory() as f32
+                            });
+                            let swap = config.swap_enabled.then(||{
+                                1. - sys.free_swap() as f32 / sys.total_swap() as f32
+                            });
 
-                    let message = Message::UsageUpdate {
-                        cpu: Some(cpu_usage),
-                        mem: Some(memory_usage),
-                        swap: Some(swap_usage),
-                    };
+                            let message = Message::UsageUpdate {
+                                cpu,
+                                mem,
+                                swap,
+                            };
 
-                    output.send(message).await.unwrap();
+                            output.send(message).await.unwrap();
+                        }
+
+                        Ok((usage, enabled)) = update_stats_rx.recv() => {
+                            match usage {
+                                UsageElement::Cpu => config.cpu_enabled = enabled,
+                                UsageElement::Memory => config.memory_enabled = enabled,
+                                UsageElement::Swap => config.swap_enabled = enabled,
+                            }
+                        }
+                    }
                 }
             }),
         );
@@ -225,19 +247,31 @@ impl cosmic::Application for UsageApp {
                 }
             }
             Message::ToggleElement(e) => {
-                match e {
-                    UsageElement::Cpu => self.config.cpu_enabled = !self.config.cpu_enabled,
-                    UsageElement::Memory => {
-                        self.config.memory_enabled = !self.config.memory_enabled
+                let enabled = match e {
+                    UsageElement::Cpu => {
+                        self.config.cpu_enabled = !self.config.cpu_enabled;
+                        self.config.cpu_enabled
                     }
-                    UsageElement::Swap => self.config.swap_enabled = !self.config.swap_enabled,
-                }
+                    UsageElement::Memory => {
+                        self.config.memory_enabled = !self.config.memory_enabled;
+                        self.config.memory_enabled
+                    }
+                    UsageElement::Swap => {
+                        self.config.swap_enabled = !self.config.swap_enabled;
+                        self.config.swap_enabled
+                    }
+                };
                 if let Ok(config) = cosmic_config::Config::new(Self::APP_ID, Config::VERSION) {
                     // If writing the config fails, we still want to continue.
                     // If I start using tracing, then I'll want to log something.
                     let _ = self.config.write_entry(&config);
                 }
-                Task::none()
+
+                let update_stats_tx = self.update_stats_tx.clone();
+                Task::future(async move {
+                    _ = update_stats_tx.send((e, enabled));
+                })
+                .discard()
             }
         }
     }
