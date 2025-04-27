@@ -4,6 +4,7 @@ use std::{sync::LazyLock, time::Duration};
 
 use crate::{config::Config, fl};
 use cosmic::{
+    applet::padded_control,
     cosmic_config::{self, CosmicConfigEntry},
     iced::{stream, window, Subscription},
     iced_widget::column,
@@ -132,7 +133,9 @@ impl cosmic::Application for UsageApp {
             checkbox("Swap", self.config.swap_enabled)
                 .on_toggle(|_| Message::ToggleElement(UsageElement::Swap)),
         ]
-        .apply(container);
+        .spacing(2)
+        .apply(container)
+        .apply(padded_control);
         self.core.applet.popup_container(col).into()
     }
 
