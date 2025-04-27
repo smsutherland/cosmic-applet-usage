@@ -5,10 +5,11 @@ use std::{sync::LazyLock, time::Duration};
 use crate::{config::Config, fl};
 use cosmic::{
     cosmic_config::{self, CosmicConfigEntry},
-    iced::{alignment::Vertical, stream, Subscription},
-    iced_widget::row,
+    iced::{stream, window, Subscription},
+    iced_widget::column,
+    iced_winit::commands::popup::{destroy_popup, get_popup},
     prelude::*,
-    widget::{autosize, Id},
+    widget::{autosize, button, checkbox, container, Id, Row},
 };
 use futures_util::SinkExt;
 use tokio::time::interval;
@@ -17,12 +18,14 @@ static AUTOSIZE_MAIN_ID: LazyLock<Id> = LazyLock::new(|| Id::new("autosize-main"
 
 /// The application model stores app-specific state used to describe its interface and
 /// drive its logic.
+#[derive(Default)]
 pub struct UsageApp {
     /// Application state which is managed by the COSMIC runtime.
     core: cosmic::Core,
     // Configuration data that persists between application runs.
     config: Config,
     usage_info: UsageInfo,
+    popup: Option<window::Id>,
 }
 
 /// Messages emitted by the application and its widgets.
@@ -34,6 +37,8 @@ pub enum Message {
         mem: Option<f32>,
         swap: Option<f32>,
     },
+    TogglePopup,
+    ToggleElement(UsageElement),
 }
 
 /// Create a COSMIC application from the app model
@@ -70,16 +75,10 @@ impl cosmic::Application for UsageApp {
             config: cosmic_config::Config::new(Self::APP_ID, Config::VERSION)
                 .map(|context| match Config::get_entry(&context) {
                     Ok(config) => config,
-                    Err((_errors, config)) => {
-                        // for why in errors {
-                        //     tracing::error!(%why, "error loading app config");
-                        // }
-
-                        config
-                    }
+                    Err((_errors, config)) => config,
                 })
                 .unwrap_or_default(),
-            usage_info: UsageInfo::default(),
+            ..Default::default()
         };
 
         (app, Task::none())
@@ -105,11 +104,35 @@ impl cosmic::Application for UsageApp {
             .applet
             .text(fl!("swap", swap = ((self.usage_info.swap * 100.) as u8)));
 
-        autosize::autosize(
-            row![cpu, memory, swap].spacing(5).align_y(Vertical::Center),
-            AUTOSIZE_MAIN_ID.clone(),
-        )
-        .into()
+        let mut row = Row::new().spacing(5);
+        if self.config.cpu_enabled {
+            row = row.push(cpu);
+        }
+        if self.config.memory_enabled {
+            row = row.push(memory);
+        }
+        if self.config.swap_enabled {
+            row = row.push(swap);
+        };
+
+        let btn = button::custom(row)
+            .on_press(Message::TogglePopup)
+            .class(cosmic::theme::Button::AppletIcon);
+
+        autosize::autosize(btn, AUTOSIZE_MAIN_ID.clone()).into()
+    }
+
+    fn view_window(&self, _id: window::Id) -> Element<Self::Message> {
+        let col = column![
+            checkbox("CPU", self.config.cpu_enabled)
+                .on_toggle(|_| Message::ToggleElement(UsageElement::Cpu)),
+            checkbox("Memory", self.config.memory_enabled)
+                .on_toggle(|_| Message::ToggleElement(UsageElement::Memory)),
+            checkbox("Swap", self.config.swap_enabled)
+                .on_toggle(|_| Message::ToggleElement(UsageElement::Swap)),
+        ]
+        .apply(container);
+        self.core.applet.popup_container(col).into()
     }
 
     /// Register subscriptions for this application.
@@ -170,6 +193,7 @@ impl cosmic::Application for UsageApp {
         match message {
             Message::UpdateConfig(config) => {
                 self.config = config;
+                Task::none()
             }
             Message::UsageUpdate { cpu, mem, swap } => {
                 if let Some(cpu) = cpu {
@@ -181,9 +205,41 @@ impl cosmic::Application for UsageApp {
                 if let Some(swap) = swap {
                     self.usage_info.swap = swap;
                 }
+                Task::none()
+            }
+            Message::TogglePopup => {
+                if let Some(id) = self.popup.take() {
+                    destroy_popup(id)
+                } else {
+                    let new_id = window::Id::unique();
+                    self.popup.replace(new_id);
+                    let popup_settings = self.core.applet.get_popup_settings(
+                        self.core.main_window_id().unwrap(),
+                        new_id,
+                        None,
+                        None,
+                        None,
+                    );
+
+                    get_popup(popup_settings)
+                }
+            }
+            Message::ToggleElement(e) => {
+                match e {
+                    UsageElement::Cpu => self.config.cpu_enabled = !self.config.cpu_enabled,
+                    UsageElement::Memory => {
+                        self.config.memory_enabled = !self.config.memory_enabled
+                    }
+                    UsageElement::Swap => self.config.swap_enabled = !self.config.swap_enabled,
+                }
+                if let Ok(config) = cosmic_config::Config::new(Self::APP_ID, Config::VERSION) {
+                    // If writing the config fails, we still want to continue.
+                    // If I start using tracing, then I'll want to log something.
+                    let _ = self.config.write_entry(&config);
+                }
+                Task::none()
             }
         }
-        Task::none()
     }
 
     fn style(&self) -> Option<cosmic::iced_runtime::Appearance> {
@@ -191,9 +247,16 @@ impl cosmic::Application for UsageApp {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 struct UsageInfo {
     cpu: f32,
     memory: f32,
     swap: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum UsageElement {
+    Cpu,
+    Memory,
+    Swap,
 }
