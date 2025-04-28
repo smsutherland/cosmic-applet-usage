@@ -126,11 +126,11 @@ impl cosmic::Application for UsageApp {
 
     fn view_window(&self, _id: window::Id) -> Element<Self::Message> {
         let col = column![
-            checkbox("CPU", self.config.cpu_enabled)
+            checkbox(fl!("cpu-box"), self.config.cpu_enabled)
                 .on_toggle(|_| Message::ToggleElement(UsageElement::Cpu)),
-            checkbox("Memory", self.config.memory_enabled)
+            checkbox(fl!("memory-box"), self.config.memory_enabled)
                 .on_toggle(|_| Message::ToggleElement(UsageElement::Memory)),
-            checkbox("Swap", self.config.swap_enabled)
+            checkbox(fl!("swap-box"), self.config.swap_enabled)
                 .on_toggle(|_| Message::ToggleElement(UsageElement::Swap)),
         ]
         .spacing(2)
